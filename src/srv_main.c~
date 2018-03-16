@@ -1,0 +1,173 @@
+#include <sys/socket.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <string.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/prctl.h>
+#include <sys/signal.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <sqlite3.h>
+
+#include "structs_clients.h"
+#include "srv_actions.h"
+
+#include "info_client_struct.h"
+#include "srv_main.h"
+#include "str2.h"
+
+#define INET_ADDRSTRLEN 16
+#define SA struct sockaddr
+#define LISTENQ 1024
+#define SERV_PORT 2000
+#define MAX_THREADS 100
+
+extern client info_client[MAXCLI];
+extern int info_client_ind;
+
+pthread_t threads[MAX_THREADS];
+pthread_mutex_t lock;
+int socket_fd[MAX_THREADS];
+int thread_nb = 0;
+
+int main(void)
+{
+  int listenfd, connfd;
+  char buff_ip_addr[INET_ADDRSTRLEN];
+  struct sockaddr_in servaddr, new_cli_addr;
+  socklen_t cli_addr_len;
+
+  memset(buff_ip_addr, '\0', sizeof(buff_ip_addr));
+
+  listenfd = socket(AF_INET, SOCK_STREAM, 0);
+
+  bzero(&servaddr, sizeof(servaddr));
+  servaddr.sin_family = AF_INET;
+  servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+  servaddr.sin_port = htons(SERV_PORT);
+
+  bind(listenfd, (SA *) &servaddr, sizeof(servaddr));
+  listen(listenfd, LISTENQ);
+
+  init_info_client();
+  open_bd();
+
+  /*
+
+  */
+
+  for ( ; ; )
+    {
+      int rc; 
+
+      connfd = accept(listenfd, (SA*) &new_cli_addr, &cli_addr_len);
+
+      socket_fd[thread_nb] = connfd;
+
+      rc = pthread_create(&threads[thread_nb++], NULL, wait_for_messages_menu_srv, (void *)(intptr_t)socket_fd[thread_nb]);
+      thread_nb++;
+    }
+}
+
+void* wait_for_messages_menu_srv(void *fd)
+{
+  int option_choosen = -1;
+  char msg_read[RD_W_FIFO];
+  char msg_read_cp[RD_W_FIFO];
+  client current_client;
+  char *args_from_msg[10];
+  int nb_of_args;
+  int sockfd = (intptr_t) fd;
+
+  while(1)
+    {
+      memset(msg_read, '\0', sizeof(msg_read));
+      memset(msg_read_cp, '\0', sizeof(msg_read_cp));
+      
+      read(sockfd, msg_read, sizeof(msg_read));
+      strncpy(msg_read_cp, msg_read, sizeof(msg_read_cp));
+
+      parse_msg_received(msg_read, args_from_msg, &nb_of_args);
+
+      option_choosen = atoi(args_from_msg[0]);
+      switch(option_choosen)
+	{
+	case 1:
+	  {
+	    pthread_mutex_lock(&lock);
+	    add_friend_action_srv(sockfd, &current_client, args_from_msg[1]);
+	    pthread_mutex_unlock(&lock);
+	    break;
+	  }
+	case 2:
+	  {
+	    pthread_mutex_lock(&lock);
+	    chat_with_friend_action_srv(sockfd, args_from_msg[2],
+					 msg_read_cp, sizeof(msg_read_cp));
+	    pthread_mutex_unlock(&lock);
+	    break;
+	  }
+	case 3:
+	  {
+	    signin_action_srv(sockfd, args_from_msg[1], args_from_msg[2]);
+
+	    if (get_user_with_fd(&current_client, sockfd) == false)
+	      {
+		printf("Exiting thread!\n");
+		pthread_exit((void *)2);
+	      }
+	    break;
+	  }
+	case 4:
+	  {
+	    signup_action_srv(sockfd, args_from_msg[1], args_from_msg[2]);
+	    break;
+	  }
+	default:
+	  {
+	    printf("Error while parsing the message\n");
+	    break;
+	  }
+	}
+      free_token_array(args_from_msg, nb_of_args);
+    }
+}
+
+bool add_friend_srv(client *curr_user, char *email_of_friend)
+{
+  bool ret_user_exists = false;
+  friend new_friend;
+
+  memset(&new_friend, '\0', sizeof(new_friend));
+  
+  ret_user_exists = verify_user_exists(email_of_friend);
+  if (ret_user_exists == false)
+    {
+      printf("Could not add friend to user\n");
+      fflush(stdout);
+      return false;
+    }
+
+  strncpy(new_friend.email, email_of_friend, strlen(email_of_friend));
+  strncpy(new_friend.nick_name, email_of_friend, strlen(email_of_friend));
+
+  curr_user->friends[curr_user->friends_ind] = new_friend;
+  curr_user->friends_ind++;
+  
+  if (update_user_to_db(curr_user) == false)
+    {
+      fflush(stdout);
+      curr_user->friends_ind--;
+      return false;
+    }
+  return true;
+}
+
+
+
+
+
+
